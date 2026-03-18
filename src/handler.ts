@@ -123,7 +123,6 @@ export function createMessageHandler(app: SlackApp, state: StateStore) {
         cwd,
         env: buildClaudeEnv(),
         systemPrompt: SYSTEM_PROMPT,
-        allowedTools: ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "Agent", "WebFetch", "WebSearch", "Skill"],
         maxTurns: MAX_TURNS,
         permissionMode: "bypassPermissions",
         stderr: (data: string) => {

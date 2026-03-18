@@ -127,13 +127,13 @@ export function formatResultBlocks(text: string): unknown[] {
       }
     }
     if (chunk.trim()) {
-      blocks.push({ type: "section", text: { type: "mrkdwn", text: chunk } });
+      blocks.push({ type: "section", expand: true, text: { type: "mrkdwn", text: chunk } });
     }
   }
 
   if (blocks.length > 50) {
     blocks.length = 49;
-    blocks.push({ type: "section", text: { type: "mrkdwn", text: "_...response truncated_" } });
+    blocks.push({ type: "section", expand: true, text: { type: "mrkdwn", text: "_...response truncated_" } });
   }
 
   return blocks.length ? blocks : [{ type: "section", text: { type: "mrkdwn", text: "(no output)" } }];
