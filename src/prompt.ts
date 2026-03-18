@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { PATHS } from "./config.ts";
+import { PATHS } from "./config.js";
 
 const DEFAULT_APPEND = `You are a coding assistant running on a local machine via a Slack bot.
 You have full filesystem access and can read, write, edit files, and run commands.

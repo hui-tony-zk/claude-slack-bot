@@ -1,3 +1,5 @@
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { PATHS } from "./config.js";
 import { logThread } from "./logger.js";
 import type { SayFn } from "./types.js";
@@ -9,6 +11,7 @@ export type CommandResult = { handled: boolean };
 export async function handleCommand(
   text: string,
   threadTs: string,
+  channel: string,
   say: SayFn,
   state: StateStore
 ): Promise<CommandResult> {
@@ -42,7 +45,11 @@ export async function handleCommand(
 
   if (text === "/restart") {
     await say({ text: ":arrows_counterclockwise: Restarting bot...", thread_ts: threadTs });
-    logThread(threadTs, "User requested restart via /restart");
+    logThread(threadTs, "User requested restart via /restart", { channel });
+    writeFileSync(
+      join(PATHS.DATA_DIR, "restart-origin.json"),
+      JSON.stringify({ channel, threadTs }),
+    );
     const { execSync } = await import("node:child_process");
     execSync(`${PATHS.ROOT_DIR}/restart-bot.sh`, { cwd: PATHS.ROOT_DIR, timeout: 15000 });
     return { handled: true };

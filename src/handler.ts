@@ -69,7 +69,7 @@ export function createMessageHandler(app: SlackApp, state: StateStore) {
       return;
     }
 
-    const { handled } = await handleCommand(text.trim(), threadTs, say, state);
+    const { handled } = await handleCommand(text.trim(), threadTs, event.channel, say, state);
     if (handled) return;
 
     const cwd = state.threadCwd.get(threadTs) || DEFAULT_CWD;

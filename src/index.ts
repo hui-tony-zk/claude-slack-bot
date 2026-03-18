@@ -1,6 +1,8 @@
 import "dotenv/config";
 import bolt from "@slack/bolt";
-import { DEFAULT_CWD } from "./config.js";
+import { readFileSync, unlinkSync } from "node:fs";
+import { join } from "node:path";
+import { DEFAULT_CWD, PATHS } from "./config.js";
 import { createMessageHandler } from "./handler.js";
 import { removeLegacyRuntimeLog, writeLog } from "./logger.js";
 import { createStateStore } from "./state.js";
@@ -62,7 +64,23 @@ process.on("uncaughtException", (err) => {
   });
 });
 
-async function notifyInterruptedThreads(): Promise<void> {
+async function notifyRestart(): Promise<void> {
+  const restartOriginPath = join(PATHS.DATA_DIR, "restart-origin.json");
+  try {
+    const raw = readFileSync(restartOriginPath, "utf-8");
+    const { channel, threadTs } = JSON.parse(raw);
+    writeLog("info", { scope: "startup", message: "Found restart-origin marker", threadTs, channel });
+    unlinkSync(restartOriginPath);
+    await app.client.chat.postMessage({
+      channel,
+      thread_ts: threadTs,
+      text: ":white_check_mark: Bot restarted successfully.",
+    });
+    writeLog("info", { scope: "startup", message: "Notified restart origin thread", threadTs, channel });
+  } catch {
+    // No restart-origin file or already cleaned up
+  }
+
   for (const [threadTs, query] of state.interruptedQueries.entries()) {
     if (query.reason !== "Bot restarted before query completed") continue;
     if (!query.channel) continue;
@@ -95,7 +113,7 @@ async function main(): Promise<void> {
   state.markRecoveredQueriesAsInterrupted();
   state.acquireProcessLock();
   await app.start();
-  await notifyInterruptedThreads();
+  await notifyRestart();
   writeLog("info", {
     scope: "startup",
     message: "Claude Slack bot started",
