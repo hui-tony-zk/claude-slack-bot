@@ -26,6 +26,7 @@ stop_existing_bot() {
   fi
 
   if ! kill -0 "$pid" 2>/dev/null; then
+    rm -f "$PID_FILE"
     return
   fi
 
@@ -34,6 +35,7 @@ stop_existing_bot() {
 
   for _ in {1..50}; do
     if ! kill -0 "$pid" 2>/dev/null; then
+      rm -f "$PID_FILE"
       return
     fi
     sleep 0.2
@@ -41,6 +43,10 @@ stop_existing_bot() {
 
   log "Force killing unresponsive bot pid=$pid"
   kill -9 "$pid" 2>/dev/null || true
+  sleep 0.2
+
+  # Clean up stale PID file after process is confirmed dead
+  rm -f "$PID_FILE"
 }
 
 start_bot() {

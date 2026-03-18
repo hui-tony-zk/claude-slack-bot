@@ -35,7 +35,8 @@ app.event("message", async (args: any) => {
     botId: event.bot_id || null,
     subtype: event.subtype || null,
   });
-  if (event.channel_type !== "im" || event.bot_id || event.subtype) return;
+  if (event.channel_type !== "im" || event.bot_id) return;
+  if (event.subtype && event.subtype !== "file_share") return;
   await handleMessage(args);
 });
 
@@ -61,11 +62,40 @@ process.on("uncaughtException", (err) => {
   });
 });
 
+async function notifyInterruptedThreads(): Promise<void> {
+  for (const [threadTs, query] of state.interruptedQueries.entries()) {
+    if (query.reason !== "Bot restarted before query completed") continue;
+    if (!query.channel) continue;
+    try {
+      await app.client.chat.postMessage({
+        channel: query.channel,
+        thread_ts: threadTs,
+        text: ":white_check_mark: Bot restarted successfully.",
+      });
+      state.interruptedQueries.delete(threadTs);
+      writeLog("info", {
+        scope: "startup",
+        message: "Notified interrupted thread of successful restart",
+        threadTs,
+      });
+    } catch (err) {
+      writeLog("error", {
+        scope: "startup",
+        message: "Failed to notify interrupted thread",
+        threadTs,
+        error: (err as Error).message,
+      });
+    }
+  }
+  state.saveSessions();
+}
+
 async function main(): Promise<void> {
   removeLegacyRuntimeLog();
   state.markRecoveredQueriesAsInterrupted();
   state.acquireProcessLock();
   await app.start();
+  await notifyInterruptedThreads();
   writeLog("info", {
     scope: "startup",
     message: "Claude Slack bot started",

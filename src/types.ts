@@ -26,6 +26,14 @@ export type ActiveQuery = {
   detail?: string;
 };
 
+export type SlackFile = {
+  id: string;
+  name?: string;
+  mimetype?: string;
+  url_private?: string;
+  filetype?: string;
+};
+
 export type BotEvent = {
   thread_ts?: string;
   ts: string;
@@ -35,6 +43,7 @@ export type BotEvent = {
   channel_type?: string;
   bot_id?: string;
   subtype?: string;
+  files?: SlackFile[];
 };
 
 export type SayArgs = {

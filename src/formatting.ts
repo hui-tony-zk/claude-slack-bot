@@ -31,19 +31,76 @@ export function formatToolDetail(name: string, input: Record<string, unknown> = 
   }
 }
 
-export function buildProgressBlocks(
-  completedTools: Array<{ name: string; detail: string }>,
-  currentTool: { name: string; detail: string } | null
-): unknown[] {
-  const lines = [":hourglass_flowing_sand: *Working on it...*"];
-  if (completedTools.length || currentTool) lines.push("");
-  for (const tool of completedTools.slice(-10)) {
-    lines.push(`:white_check_mark: ${tool.name}${tool.detail ? ` \`${tool.detail}\`` : ""}`);
+function collapseTools(
+  tools: Array<{ name: string; detail: string }>
+): Array<{ name: string; details: string[] }> {
+  const collapsed: Array<{ name: string; details: string[] }> = [];
+  for (const tool of tools) {
+    const last = collapsed[collapsed.length - 1];
+    if (last && last.name === tool.name) {
+      if (tool.detail) last.details.push(tool.detail);
+    } else {
+      collapsed.push({ name: tool.name, details: tool.detail ? [tool.detail] : [] });
+    }
+  }
+  return collapsed;
+}
+
+function formatElapsedMs(ms: number): string {
+  const secs = Math.floor(ms / 1000);
+  if (secs < 60) return `${secs}s`;
+  const mins = Math.floor(secs / 60);
+  const rem = secs % 60;
+  return `${mins}m ${rem}s`;
+}
+
+function formatElapsed(startTime: number): string {
+  return formatElapsedMs(Date.now() - startTime);
+}
+
+function toolLines(
+  tools: Array<{ name: string; detail: string }>,
+  currentTool?: { name: string; detail: string } | null
+): string[] {
+  const lines: string[] = [];
+  for (const group of collapseTools(tools.slice(-10))) {
+    const detail = group.details.length ? ` ${group.details.join(", ")}` : "";
+    lines.push(`${group.name}${detail}`);
   }
   if (currentTool) {
-    lines.push(`:gear: ${currentTool.name}${currentTool.detail ? ` \`${currentTool.detail}\`` : ""}...`);
+    lines.push(`${currentTool.name}${currentTool.detail ? ` ${currentTool.detail}` : ""}...`);
   }
-  return [{ type: "section", text: { type: "mrkdwn", text: lines.join("\n") } }];
+  return lines;
+}
+
+export function buildProgressBlocks(
+  completedTools: Array<{ name: string; detail: string }>,
+  currentTool: { name: string; detail: string } | null,
+  startTime?: number
+): unknown[] {
+  const elapsed = startTime ? formatElapsed(startTime) : "";
+  const elements: unknown[] = [
+    { type: "mrkdwn", text: `Working on it... ${elapsed}` },
+  ];
+  const lines = toolLines(completedTools, currentTool);
+  for (const line of lines) {
+    elements.push({ type: "mrkdwn", text: line });
+  }
+  return [{ type: "context", elements }];
+}
+
+export function buildCompletedTraceBlocks(
+  completedTools: Array<{ name: string; detail: string }>,
+  elapsedMs: number
+): unknown[] {
+  const elapsed = formatElapsedMs(elapsedMs);
+  const elements: unknown[] = [
+    { type: "mrkdwn", text: `Done (${elapsed})` },
+  ];
+  for (const line of toolLines(completedTools)) {
+    elements.push({ type: "mrkdwn", text: line });
+  }
+  return [{ type: "context", elements }];
 }
 
 export function formatResultBlocks(text: string): unknown[] {
