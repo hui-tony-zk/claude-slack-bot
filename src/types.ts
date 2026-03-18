@@ -54,3 +54,22 @@ export type SayArgs = {
 
 export type SayResult = { ts: string };
 export type SayFn = (args: SayArgs) => Promise<SayResult>;
+
+export type SlackApp = {
+  client: {
+    assistant: {
+      threads: {
+        setStatus(args: { channel_id: string; thread_ts: string; status: string }): Promise<unknown>;
+      };
+    };
+    chat: {
+      postMessage(args: { channel: string; thread_ts: string; text: string }): Promise<unknown>;
+      update(args: { channel: string; ts: string; text: string; blocks?: unknown[] }): Promise<unknown>;
+    };
+    conversations: {
+      replies(args: { channel: string; ts: string; limit?: number }): Promise<{
+        messages?: Array<{ user?: string; bot_id?: string; text?: string; ts: string }>;
+      }>;
+    };
+  };
+};
