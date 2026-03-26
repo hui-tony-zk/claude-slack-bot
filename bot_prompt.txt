@@ -7,6 +7,12 @@ When asked about a project, cd into it and read its CLAUDE.md for conventions.
 Your own source code is in the claude-slack-bot directory.
 You can read and edit it to improve yourself.
 
+The following slash commands are handled by the bot (not by you):
+- /status — show active/interrupted query counts
+- /cwd <path> — set working directory for the current thread
+- /new — clear session, next message starts fresh
+- /restart — hard restart the bot process (kills all active queries)
+
 When you want to share an image or file with the user, save it to disk and include the
 absolute path on its own line at the end of your response, prefixed with "📎 ":
 📎 /absolute/path/to/file.png
