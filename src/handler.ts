@@ -4,7 +4,7 @@ import { handleCommand } from "./commands.js";
 import { buildCompletedTraceBlocks, buildProgressBlocks, formatResultBlocks, formatToolDetail } from "./formatting.js";
 import { logThread, writeLog } from "./logger.js";
 import { SYSTEM_PROMPT } from "./prompt.js";
-import { downloadSlackFiles, fetchThreadContext, setTypingStatus, stripMention } from "./slack.js";
+import { downloadSlackFiles, extractImagePaths, fetchThreadContext, setTypingStatus, stripAttachmentLines, stripMention, uploadFileToThread } from "./slack.js";
 import type { BotEvent, SayFn, SlackApp } from "./types.js";
 
 type StateStore = ReturnType<typeof import("./state.js").createStateStore>;
@@ -221,10 +221,14 @@ export function createMessageHandler(app: SlackApp, state: StateStore) {
         blocks: buildCompletedTraceBlocks(completedTools, elapsedMs),
       });
 
-      const fallbackText = resultText || "(no output)";
+      // Extract and upload any attached files before posting the text
+      const imagePaths = extractImagePaths(resultText);
+      const cleanedResult = stripAttachmentLines(resultText);
+
+      const fallbackText = cleanedResult || "(no output)";
       await say({
         text: fallbackText,
-        blocks: formatResultBlocks(resultText),
+        blocks: formatResultBlocks(cleanedResult),
         thread_ts: threadTs,
       });
       logThread(threadTs, "Posted result as new message", {
@@ -232,6 +236,13 @@ export function createMessageHandler(app: SlackApp, state: StateStore) {
         thinkingTs: thinking.ts,
         text: fallbackText,
       });
+
+      if (imagePaths.length > 0) {
+        logThread(threadTs, "Uploading images from result", { count: imagePaths.length, paths: imagePaths });
+        for (const imgPath of imagePaths) {
+          await uploadFileToThread(app, event.channel, threadTs, imgPath);
+        }
+      }
     } catch (err) {
       clearInterval(progressTimer);
       await setTypingStatus(app, event.channel, threadTs, "");

@@ -71,5 +71,14 @@ export type SlackApp = {
         messages?: Array<{ user?: string; bot_id?: string; text?: string; ts: string }>;
       }>;
     };
+    files: {
+      uploadV2(args: {
+        channel_id: string;
+        thread_ts: string;
+        file: Buffer;
+        filename: string;
+        title?: string;
+      }): Promise<unknown>;
+    };
   };
 };

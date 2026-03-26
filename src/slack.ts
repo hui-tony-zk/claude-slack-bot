@@ -1,5 +1,5 @@
-import { writeFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { writeFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
+import { join, basename } from "node:path";
 import { PATHS } from "./config.js";
 import { writeLog } from "./logger.js";
 import type { SlackApp, SlackFile } from "./types.js";
@@ -81,6 +81,49 @@ export async function fetchThreadContext(
       error: (err as Error).message,
     });
     return null;
+  }
+}
+
+const UPLOADABLE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "pdf"]);
+
+/** Extract file paths from structured "📎 /path/to/file" lines in the result text. */
+export function extractImagePaths(text: string): string[] {
+  const paths: string[] = [];
+  for (const line of text.split("\n")) {
+    const match = line.match(/^📎\s+(\/\S+)/);
+    if (match && existsSync(match[1])) paths.push(match[1]);
+  }
+  return [...new Set(paths)];
+}
+
+/** Strip "📎 /path" lines from text before sending to Slack. */
+export function stripAttachmentLines(text: string): string {
+  return text.split("\n").filter((line) => !line.match(/^📎\s+\//)).join("\n").trimEnd();
+}
+
+/** Upload a file to a Slack thread. */
+export async function uploadFileToThread(
+  app: SlackApp,
+  channel: string,
+  threadTs: string,
+  filePath: string,
+  title?: string,
+): Promise<void> {
+  const ext = filePath.split(".").pop()?.toLowerCase() || "";
+  if (!UPLOADABLE_EXTENSIONS.has(ext)) return;
+
+  try {
+    const fileBuffer = readFileSync(filePath);
+    await app.client.files.uploadV2({
+      channel_id: channel,
+      thread_ts: threadTs,
+      file: fileBuffer,
+      filename: basename(filePath),
+      title: title || basename(filePath),
+    });
+    writeLog("info", { scope: "upload", message: "Uploaded file to Slack", filePath, channel, threadTs });
+  } catch (err) {
+    writeLog("error", { scope: "upload", message: "File upload failed", filePath, error: (err as Error).message });
   }
 }
 

@@ -86,6 +86,8 @@ export function buildProgressBlocks(
   for (const line of lines) {
     elements.push({ type: "mrkdwn", text: line });
   }
+  // Slack context blocks allow max 10 elements
+  if (elements.length > 10) elements.length = 10;
   return [{ type: "context", elements }];
 }
 
@@ -100,6 +102,8 @@ export function buildCompletedTraceBlocks(
   for (const line of toolLines(completedTools)) {
     elements.push({ type: "mrkdwn", text: line });
   }
+  // Slack context blocks allow max 10 elements
+  if (elements.length > 10) elements.length = 10;
   return [{ type: "context", elements }];
 }
 
