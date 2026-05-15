@@ -5,6 +5,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DATA_DIR="$ROOT_DIR/.data"
 PID_FILE="$DATA_DIR/bot.pid"
+WRAPPER_PID_FILE="$DATA_DIR/wrapper.pid"
 RESTART_LOG="$DATA_DIR/restart.log"
 
 mkdir -p "$DATA_DIR"
@@ -13,44 +14,53 @@ log() {
   printf '%s %s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$*" >> "$RESTART_LOG"
 }
 
-stop_existing_bot() {
-  if [[ ! -f "$PID_FILE" ]]; then
+kill_pid_file() {
+  local file="$1"
+  local label="$2"
+
+  if [[ ! -f "$file" ]]; then
     return
   fi
 
   local pid
-  pid="$(<"$PID_FILE")"
+  pid="$(<"$file")"
 
   if [[ -z "$pid" ]]; then
+    rm -f "$file"
     return
   fi
 
   if ! kill -0 "$pid" 2>/dev/null; then
-    rm -f "$PID_FILE"
+    rm -f "$file"
     return
   fi
 
-  log "Stopping existing bot pid=$pid"
+  log "Stopping $label pid=$pid"
   kill "$pid" 2>/dev/null || true
 
   for _ in {1..50}; do
     if ! kill -0 "$pid" 2>/dev/null; then
-      rm -f "$PID_FILE"
+      rm -f "$file"
       return
     fi
     sleep 0.2
   done
 
-  log "Force killing unresponsive bot pid=$pid"
+  log "Force killing unresponsive $label pid=$pid"
   kill -9 "$pid" 2>/dev/null || true
   sleep 0.2
+  rm -f "$file"
+}
 
-  # Clean up stale PID file after process is confirmed dead
-  rm -f "$PID_FILE"
+stop_existing_bot() {
+  # Kill the bot process first so it exits cleanly (code 0),
+  # which tells the wrapper to stop its restart loop.
+  kill_pid_file "$PID_FILE" "bot"
+  kill_pid_file "$WRAPPER_PID_FILE" "wrapper"
 }
 
 start_bot() {
-  log "Starting bot"
+  log "Starting bot via crash-recovery wrapper"
   local spawned_pid
   spawned_pid="$(
     node - "$ROOT_DIR" "$RESTART_LOG" <<'NODE'
@@ -61,7 +71,7 @@ const { spawn } = require("node:child_process");
 const rootDir = process.argv[2];
 const restartLog = process.argv[3];
 const stderrFd = fs.openSync(restartLog, "a");
-const child = spawn(path.join(rootDir, "node_modules", ".bin", "tsx"), [path.join(rootDir, "src", "index.ts")], {
+const child = spawn(path.join(rootDir, "run-loop.sh"), [], {
   cwd: rootDir,
   detached: true,
   stdio: ["ignore", "ignore", stderrFd],
@@ -77,7 +87,7 @@ console.log(child.pid);
 NODE
   )"
 
-  log "Spawned bot pid=$spawned_pid"
+  log "Spawned wrapper pid=$spawned_pid"
 
   for _ in {1..100}; do
     if [[ -f "$PID_FILE" ]]; then

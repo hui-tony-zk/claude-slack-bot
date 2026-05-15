@@ -58,10 +58,11 @@ process.on("unhandledRejection", (err) => {
 process.on("uncaughtException", (err) => {
   writeLog("error", {
     scope: "process",
-    message: "Uncaught exception",
+    message: "Uncaught exception — exiting with code 1 for crash recovery",
     error: err.message,
     stack: err.stack || null,
   });
+  process.exit(1);
 });
 
 async function notifyRestart(): Promise<void> {

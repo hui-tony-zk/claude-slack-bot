@@ -15,6 +15,7 @@
   "description": "",
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.74",
+    "@openai/codex-sdk": "^0.130.0",
     "@slack/bolt": "^4.6.0",
     "dotenv": "^17.3.1"
   },

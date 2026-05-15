@@ -29,6 +29,7 @@ npm start              # production
 - **Image attachments** — downloads images from Slack, passes file paths to Claude
 - **Progress tracking** — updates Slack message with tool execution trace
 - **Typing indicator** — native Slack status via `assistant.threads.setStatus`
+- **Crash recovery** — automatically restarts after crashes (non-zero exit), stops cleanly on intentional shutdown
 - **Restart confirmation** — posts confirmation after `/restart`
 
 ### Slash commands (in Slack)
@@ -63,6 +64,7 @@ src/
   bot.log           — structured JSON logs
   bot.pid           — process lock file
   attachments/      — downloaded Slack images
-restart-bot.sh      — daemon restart script
+restart-bot.sh      — daemon restart script (stops wrapper + bot, spawns fresh)
+run-loop.sh         — crash-recovery wrapper (restarts bot on non-zero exit)
 system_prompt.txt   — custom system prompt (optional, gitignored)
 ```
