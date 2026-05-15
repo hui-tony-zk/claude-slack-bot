@@ -47,21 +47,24 @@ function truncateText(text: string, maxChars = 120): string {
   return text.length > maxChars ? text.slice(0, maxChars - 3) + "..." : text;
 }
 
-function formatCurrentTool(tool: { name: string; detail: string }): string {
-  return `Running ${tool.name}${tool.detail ? `: ${truncateText(tool.detail)}` : ""}`;
+function formatProgressTool(label: string, tool: { name: string; detail: string }): string {
+  return `${label} ${tool.name}${tool.detail ? `: ${truncateText(tool.detail)}` : ""}`;
 }
 
 export function buildProgressBlocks(
   _completedTools: Array<{ name: string; detail: string }>,
   currentTool: { name: string; detail: string } | null,
-  startTime?: number
+  startTime?: number,
+  lastTool?: { name: string; detail: string } | null
 ): unknown[] {
   const elapsed = startTime ? formatElapsed(startTime) : "";
   const elements: unknown[] = [
-    { type: "mrkdwn", text: `Working on it... ${elapsed}` },
+    { type: "mrkdwn", text: `Working ${elapsed}` },
   ];
   if (currentTool) {
-    elements.push({ type: "mrkdwn", text: formatCurrentTool(currentTool) });
+    elements.push({ type: "mrkdwn", text: formatProgressTool("Running", currentTool) });
+  } else if (lastTool) {
+    elements.push({ type: "mrkdwn", text: formatProgressTool("Last tool", lastTool) });
   }
   return [{ type: "context", elements }];
 }

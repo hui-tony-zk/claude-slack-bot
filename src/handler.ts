@@ -89,10 +89,11 @@ export function createMessageHandler(app: SlackApp, state: StateStore) {
     });
 
     await setTypingStatus(app, event.channel, threadTs, "is thinking...");
+    const queryStartTime = Date.now();
 
     const thinking = await say({
-      text: "Working on it...",
-      blocks: [{ type: "section", text: { type: "mrkdwn", text: ":hourglass_flowing_sand: *Working on it...*" } }],
+      text: "Working",
+      blocks: buildProgressBlocks([], null, queryStartTime),
       thread_ts: threadTs,
     });
     logThread(threadTs, "Posted thinking message", { thinkingTs: thinking.ts });
@@ -101,15 +102,15 @@ export function createMessageHandler(app: SlackApp, state: StateStore) {
     let sessionId = existingSessionId;
     const completedTools: Array<{ name: string; detail: string }> = [];
     let currentTool: { name: string; detail: string } | null = null;
-    const queryStartTime = Date.now();
+    let lastTool: { name: string; detail: string } | null = null;
 
     const progressTimer = setInterval(async () => {
       try {
         await app.client.chat.update({
           channel: event.channel,
           ts: thinking.ts,
-          text: "Working on it...",
-          blocks: buildProgressBlocks(completedTools, currentTool, queryStartTime),
+          text: "Working",
+          blocks: buildProgressBlocks(completedTools, currentTool, queryStartTime, lastTool),
         });
       } catch {}
     }, 5000);
@@ -158,6 +159,7 @@ export function createMessageHandler(app: SlackApp, state: StateStore) {
               name: block.name,
               detail: formatToolDetail(block.name, block.input),
             };
+            lastTool = currentTool;
             const now = Date.now();
             if (now - lastProgressUpdate < 2000) continue;
             lastProgressUpdate = now;
@@ -169,8 +171,8 @@ export function createMessageHandler(app: SlackApp, state: StateStore) {
               await app.client.chat.update({
                 channel: event.channel,
                 ts: thinking.ts,
-                text: "Working on it...",
-                blocks: buildProgressBlocks(completedTools, currentTool, queryStartTime),
+                text: "Working",
+                blocks: buildProgressBlocks(completedTools, currentTool, queryStartTime, lastTool),
               });
               state.updateActiveQuery(threadTs, {
                 phase: currentTool ? `tool:${currentTool.name}` : "running",
