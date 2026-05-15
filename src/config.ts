@@ -20,6 +20,10 @@ export const PATHS = {
 } as const;
 
 export const DEFAULT_CWD = process.env.DEFAULT_CWD || process.cwd();
+export const AGENT_PROVIDER = process.env.AGENT_PROVIDER === "claude" ? "claude" : "codex";
+export const DEFAULT_MODEL = process.env.DEFAULT_MODEL || process.env.CODEX_MODEL || "gpt-5.5";
+export const CODEX_MODEL_REASONING_EFFORT = process.env.CODEX_MODEL_REASONING_EFFORT || "high";
+export const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "";
 export const MAX_TURNS = parseInt(process.env.MAX_TURNS || "50", 10);
 export const MAX_LOG_BYTES = parseInt(process.env.MAX_LOG_BYTES || `${5 * 1024 * 1024}`, 10);
 export const MAX_ERROR_DETAIL_CHARS = parseInt(process.env.MAX_ERROR_DETAIL_CHARS || "2000", 10);

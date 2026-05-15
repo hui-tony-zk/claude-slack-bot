@@ -1,6 +1,6 @@
-# Claude Slack Bot
+# Agent Slack Bot
 
-Slack bot that runs Claude Code sessions via the [Claude Agent SDK](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk). DM it or @mention it in threads.
+Slack bot that runs Codex or Claude Code sessions. Codex via the [Codex SDK](https://github.com/openai/codex/tree/main/sdk/typescript) is the default; Claude remains available via the [Claude Agent SDK](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk). DM it or @mention it in threads.
 
 ## Setup
 
@@ -18,15 +18,22 @@ npm start              # production
 |----------|-------------|
 | `SLACK_BOT_TOKEN` | `xoxb-...` from OAuth & Permissions |
 | `SLACK_APP_TOKEN` | `xapp-...` from App-Level Tokens (needs `connections:write`) |
-| `DEFAULT_CWD` | Working directory for Claude sessions |
-| `MAX_TURNS` | Max turns per request (default: 50) |
+| `DEFAULT_CWD` | Working directory for agent sessions |
+| `AGENT_PROVIDER` | `codex` or `claude` (default: `codex`) |
+| `DEFAULT_MODEL` / `CODEX_MODEL` | Codex model (default: `gpt-5.5`) |
+| `CLAUDE_MODEL` | Optional Claude model override when `AGENT_PROVIDER=claude` |
+| `MAX_TURNS` | Claude max turns per request (default: 50) |
+| `CODEX_MODEL_REASONING_EFFORT` | Codex reasoning effort: `minimal`, `low`, `medium`, `high`, or `xhigh` (default: `high`) |
+| `CODEX_SANDBOX_MODE` | Optional sandbox mode (default: `danger-full-access`) |
+| `CODEX_APPROVAL_POLICY` | Optional approval policy (default: `never`) |
 
 ## Features
 
 - **DM or @mention** — responds in DMs and when tagged in threads
 - **Thread context** — fetches messages since last bot reply when tagged mid-thread
-- **Session persistence** — resumes Claude sessions across messages in the same thread; survives bot restarts
-- **Image attachments** — downloads images from Slack, passes file paths to Claude
+- **Provider switching** — set `AGENT_PROVIDER=codex` or `AGENT_PROVIDER=claude`
+- **Session persistence** — resumes sessions across messages in the same thread; survives bot restarts
+- **Image attachments** — downloads images from Slack and passes them to the active provider
 - **Progress tracking** — updates Slack message with tool execution trace
 - **Typing indicator** — native Slack status via `assistant.threads.setStatus`
 - **Crash recovery** — automatically restarts after crashes (non-zero exit), stops cleanly on intentional shutdown
@@ -46,7 +53,7 @@ npm start              # production
 ```
 src/
   index.ts        — entry point, Slack event routing, startup/shutdown
-  handler.ts      — message orchestration, Claude query loop, progress updates
+  handler.ts      — message orchestration, agent query loop, progress updates
   commands.ts     — /status, /cwd, /new, /restart
   slack.ts        — thread context fetch, image download, typing status
   state.ts        — session/query persistence (JSON files), process lock

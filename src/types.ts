@@ -17,6 +17,7 @@ export type ActiveQuery = {
   startedAt?: string;
   thinkingTs?: string | null;
   phase?: string;
+  provider?: string;
   currentTool?: { name: string; detail: string };
   completedTools?: Array<{ name: string; detail: string }>;
   lastProgressAt?: string;

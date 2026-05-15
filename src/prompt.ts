@@ -17,8 +17,4 @@ function loadAppend(): string {
   return parts.join("\n\n") || "You are a coding assistant running on a local machine via a Slack bot.";
 }
 
-export const SYSTEM_PROMPT = {
-  type: "preset",
-  preset: "claude_code",
-  append: loadAppend(),
-} as const;
+export const SYSTEM_PROMPT = loadAppend();

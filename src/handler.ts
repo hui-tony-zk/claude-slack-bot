@@ -1,21 +1,13 @@
-import { query } from "@anthropic-ai/claude-agent-sdk";
-import { DEFAULT_CWD, MAX_ERROR_DETAIL_CHARS, MAX_TURNS } from "./config.js";
+import { decodeSessionId, encodeSessionId, getProviderModel, runAgentQuery } from "./agents.js";
+import type { AgentProvider, BuiltPrompt, ToolTrace } from "./agents.js";
+import { AGENT_PROVIDER, DEFAULT_CWD, MAX_ERROR_DETAIL_CHARS } from "./config.js";
 import { handleCommand } from "./commands.js";
-import { buildCompletedTraceBlocks, buildProgressBlocks, formatResultBlocks, formatToolDetail } from "./formatting.js";
+import { buildCompletedTraceBlocks, buildProgressBlocks, formatResultBlocks } from "./formatting.js";
 import { logThread, writeLog } from "./logger.js";
-import { SYSTEM_PROMPT } from "./prompt.js";
 import { downloadSlackFiles, extractImagePaths, fetchThreadContext, setTypingStatus, stripAttachmentLines, stripMention, uploadFileToThread } from "./slack.js";
 import type { BotEvent, SayFn, SlackApp } from "./types.js";
 
 type StateStore = ReturnType<typeof import("./state.js").createStateStore>;
-
-function buildClaudeEnv(): Record<string, string> {
-  return Object.fromEntries(
-    Object.entries(process.env).filter(
-      ([key, value]) => key !== "CLAUDECODE" && !key.startsWith("CLAUDE_CODE_") && typeof value === "string"
-    )
-  ) as Record<string, string>;
-}
 
 async function buildPrompt(
   app: SlackApp,
@@ -23,15 +15,16 @@ async function buildPrompt(
   text: string,
   threadTs: string,
   hasSession: boolean
-): Promise<string> {
+): Promise<BuiltPrompt> {
   // Download image attachments
   let attachmentNote = "";
+  let imagePaths: string[] = [];
   if (event.files?.length) {
     const botToken = process.env.SLACK_BOT_TOKEN;
     if (botToken) {
-      const imagePaths = await downloadSlackFiles(event.files, botToken);
+      imagePaths = await downloadSlackFiles(event.files, botToken);
       if (imagePaths.length > 0) {
-        attachmentNote = `\n\nThe user attached ${imagePaths.length} image(s). Read them with the Read tool:\n${imagePaths.map((p) => `- ${p}`).join("\n")}`;
+        attachmentNote = `\n\nThe user attached ${imagePaths.length} image(s):\n${imagePaths.map((p) => `- ${p}`).join("\n")}`;
         logThread(threadTs, "Downloaded image attachments", { count: imagePaths.length, paths: imagePaths });
       }
     }
@@ -47,7 +40,7 @@ async function buildPrompt(
     }
   }
 
-  return prompt;
+  return { text: prompt, imagePaths };
 }
 
 export function createMessageHandler(app: SlackApp, state: StateStore) {
@@ -73,9 +66,12 @@ export function createMessageHandler(app: SlackApp, state: StateStore) {
     if (handled) return;
 
     const cwd = state.threadCwd.get(threadTs) || DEFAULT_CWD;
-    const existingSessionId = state.threadSessions.get(threadTs);
+    const storedSessionId = state.threadSessions.get(threadTs);
+    const provider = AGENT_PROVIDER as AgentProvider;
+    const existingSessionId = decodeSessionId(provider, storedSessionId);
+    const providerModel = getProviderModel(provider);
 
-    logThread(threadTs, "Starting Claude query", { cwd, sessionId: existingSessionId || null });
+    logThread(threadTs, `Starting ${provider} query`, { cwd, model: providerModel || null, sessionId: existingSessionId || null });
     state.setActiveQuery(threadTs, {
       threadTs,
       user,
@@ -86,11 +82,12 @@ export function createMessageHandler(app: SlackApp, state: StateStore) {
       startedAt: new Date().toISOString(),
       phase: "starting",
       thinkingTs: null,
+      provider,
     });
 
     await setTypingStatus(app, event.channel, threadTs, "is thinking...");
-    const queryStartTime = Date.now();
 
+    const queryStartTime = Date.now();
     const thinking = await say({
       text: "Working",
       blocks: buildProgressBlocks([], null, queryStartTime),
@@ -100,9 +97,9 @@ export function createMessageHandler(app: SlackApp, state: StateStore) {
     state.updateActiveQuery(threadTs, { phase: "running", thinkingTs: thinking.ts });
 
     let sessionId = existingSessionId;
-    const completedTools: Array<{ name: string; detail: string }> = [];
-    let currentTool: { name: string; detail: string } | null = null;
-    let lastTool: { name: string; detail: string } | null = null;
+    const completedTools: ToolTrace[] = [];
+    let currentTool: ToolTrace | null = null;
+    let lastTool: ToolTrace | null = null;
 
     const progressTimer = setInterval(async () => {
       try {
@@ -116,87 +113,61 @@ export function createMessageHandler(app: SlackApp, state: StateStore) {
     }, 5000);
 
     try {
-      let resultText = "";
-      let claudeErrorExcerpt = "";
+      const prompt = await buildPrompt(app, event, text, threadTs, !!existingSessionId);
       let lastProgressUpdate = 0;
-
-      const options: Record<string, unknown> = {
-        cwd,
-        env: buildClaudeEnv(),
-        systemPrompt: SYSTEM_PROMPT,
-        maxTurns: MAX_TURNS,
-        permissionMode: "bypassPermissions",
-        stderr: (data: string) => {
-          writeLog("error", {
-            scope: "claude-stderr",
-            threadTs,
-            message: "Claude subprocess stderr",
-            data,
+      const onSession = (newSessionId: string) => {
+        sessionId = newSessionId;
+        state.updateActiveQuery(threadTs, { sessionId, phase: "initialized" });
+      };
+      const onTool = (tool: ToolTrace | null, completedTool?: ToolTrace) => {
+        if (currentTool && completedTool === undefined && provider === "claude") {
+          completedTools.push(currentTool);
+        }
+        if (completedTool) completedTools.push(completedTool);
+        if (tool) lastTool = tool;
+        else if (completedTool) lastTool = completedTool;
+        currentTool = tool;
+      };
+      const updateProgress = async () => {
+        const now = Date.now();
+        if (now - lastProgressUpdate < 2000) return;
+        lastProgressUpdate = now;
+        try {
+          const statusText = currentTool ? `is running ${currentTool.name}...` : "is thinking...";
+          await setTypingStatus(app, event.channel, threadTs, statusText);
+          await app.client.chat.update({
+            channel: event.channel,
+            ts: thinking.ts,
+            text: "Working",
+            blocks: buildProgressBlocks(completedTools, currentTool, queryStartTime, lastTool),
           });
-          if (claudeErrorExcerpt.length < MAX_ERROR_DETAIL_CHARS) {
-            claudeErrorExcerpt += data.slice(0, MAX_ERROR_DETAIL_CHARS - claudeErrorExcerpt.length);
-          }
-        },
+          state.updateActiveQuery(threadTs, {
+            phase: currentTool ? `tool:${currentTool.name}` : "running",
+            currentTool,
+            completedTools: completedTools.slice(-10),
+            lastProgressAt: new Date(now).toISOString(),
+          });
+        } catch (err) {
+          logThread(threadTs, "Progress update failed", { error: (err as Error).message });
+        }
       };
 
-      if (existingSessionId) options.resume = existingSessionId;
-
-      const prompt = await buildPrompt(app, event, text, threadTs, !!existingSessionId);
-
-      for await (const message of query({ prompt, options })) {
-        if (message.type === "system" && message.subtype === "init") {
-          sessionId = message.session_id;
-          logThread(threadTs, "Claude session initialized", { sessionId });
-          state.updateActiveQuery(threadTs, { sessionId, phase: "initialized" });
-        }
-
-        if (message.type === "assistant") {
-          const content = message.message?.content || [];
-          for (const block of content) {
-            if (block.type !== "tool_use") continue;
-            if (currentTool) completedTools.push(currentTool);
-            currentTool = {
-              name: block.name,
-              detail: formatToolDetail(block.name, block.input),
-            };
-            lastTool = currentTool;
-            const now = Date.now();
-            if (now - lastProgressUpdate < 2000) continue;
-            lastProgressUpdate = now;
-            try {
-              const statusText = currentTool
-                ? `is running ${currentTool.name}...`
-                : "is thinking...";
-              await setTypingStatus(app, event.channel, threadTs, statusText);
-              await app.client.chat.update({
-                channel: event.channel,
-                ts: thinking.ts,
-                text: "Working",
-                blocks: buildProgressBlocks(completedTools, currentTool, queryStartTime, lastTool),
-              });
-              state.updateActiveQuery(threadTs, {
-                phase: currentTool ? `tool:${currentTool.name}` : "running",
-                currentTool,
-                completedTools: completedTools.slice(-10),
-                lastProgressAt: new Date(now).toISOString(),
-              });
-            } catch (err) {
-              logThread(threadTs, "Progress update failed", { error: (err as Error).message });
-            }
-          }
-        }
-
-        if (message.type === "result" && message.subtype === "success") resultText = message.result || "";
-        if (message.type === "result" && message.subtype !== "success") {
-          const errorMessage = (message as any).error || (message as any).message || "Unknown error";
-          resultText = `:x: Error: ${errorMessage}`;
-        }
-      }
+      const resultText = await runAgentQuery(provider, {
+        prompt,
+        cwd,
+        existingSessionId,
+        threadTs,
+        onSession,
+        onTool: (...args) => {
+          onTool(...args);
+          void updateProgress();
+        },
+      });
 
       clearInterval(progressTimer);
 
       if (sessionId) {
-        state.threadSessions.set(threadTs, sessionId);
+        state.threadSessions.set(threadTs, encodeSessionId(provider, sessionId));
         state.saveSessions();
       }
 
@@ -205,7 +176,7 @@ export function createMessageHandler(app: SlackApp, state: StateStore) {
         currentTool = null;
       }
 
-      logThread(threadTs, "Claude query completed", {
+      logThread(threadTs, `${provider} query completed`, {
         sessionId,
         resultChars: resultText.length,
         resultText,
@@ -256,7 +227,7 @@ export function createMessageHandler(app: SlackApp, state: StateStore) {
       writeLog("error", {
         scope: "thread",
         threadTs,
-        message: "Claude query failed",
+        message: `${provider} query failed`,
         error: (err as Error).message,
         detail: errorDetail,
       });
