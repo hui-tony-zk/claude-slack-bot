@@ -1,24 +1,53 @@
-import { writeFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, unlinkSync } from "node:fs";
 import { join, basename } from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { PATHS } from "./config.js";
 import { writeLog } from "./logger.js";
-import type { SlackApp, SlackFile } from "./types.js";
+import type { ToolTrace } from "./agents.js";
+import type { SlackApp, SlackFile, SlackStreamChunk } from "./types.js";
 
 const ATTACHMENTS_DIR = join(PATHS.DATA_DIR, "attachments");
 mkdirSync(ATTACHMENTS_DIR, { recursive: true });
 
 const IMAGE_TYPES = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"]);
+const VIDEO_TYPES = new Set(["mp4", "mov", "m4v", "webm", "avi", "mkv", "mpg", "mpeg", "qt"]);
+const MIME_EXTENSIONS: Record<string, string> = {
+  "image/jpeg": "jpg",
+  "video/quicktime": "mov",
+  "video/x-matroska": "mkv",
+  "video/x-msvideo": "avi",
+};
+
+export type DownloadedSlackFiles = {
+  imagePaths: string[];
+  videoPaths: string[];
+};
 
 export function stripMention(text: string): string {
   return text.replace(/<@[A-Z0-9]+>/g, "").trim();
 }
 
-export async function downloadSlackFiles(files: SlackFile[], botToken: string): Promise<string[]> {
-  const paths: string[] = [];
+function getAttachmentType(file: SlackFile): { ext: string; kind: "image" | "video" } | null {
+  const rawExt = file.filetype || file.name?.split(".").pop() || "";
+  const safeExt = rawExt.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const mime = file.mimetype?.toLowerCase() || "";
+  const ext = MIME_EXTENSIONS[mime] || safeExt || "bin";
+
+  if (mime.startsWith("image/") || IMAGE_TYPES.has(ext)) return { ext, kind: "image" };
+  if (mime.startsWith("video/") || VIDEO_TYPES.has(ext)) return { ext, kind: "video" };
+  return null;
+}
+
+export async function downloadSlackFiles(files: SlackFile[], botToken: string): Promise<DownloadedSlackFiles> {
+  const downloaded: DownloadedSlackFiles = { imagePaths: [], videoPaths: [] };
   for (const file of files) {
     if (!file.url_private) continue;
-    const ext = file.filetype || "bin";
-    if (!IMAGE_TYPES.has(ext)) continue;
+    const attachmentType = getAttachmentType(file);
+    if (!attachmentType) continue;
+    const { ext, kind } = attachmentType;
+    const filename = `${file.id}.${ext}`;
+    const filepath = join(ATTACHMENTS_DIR, filename);
     try {
       const resp = await fetch(file.url_private, {
         headers: { Authorization: `Bearer ${botToken}` },
@@ -27,16 +56,17 @@ export async function downloadSlackFiles(files: SlackFile[], botToken: string): 
         writeLog("error", { scope: "attachment", message: "Download failed", fileId: file.id, status: resp.status });
         continue;
       }
-      const buffer = Buffer.from(await resp.arrayBuffer());
-      const filename = `${file.id}.${ext}`;
-      const filepath = join(ATTACHMENTS_DIR, filename);
-      writeFileSync(filepath, buffer);
-      paths.push(filepath);
+      if (!resp.body) throw new Error("Download response had no body");
+      await pipeline(Readable.fromWeb(resp.body as any), createWriteStream(filepath));
+      downloaded[kind === "image" ? "imagePaths" : "videoPaths"].push(filepath);
     } catch (err) {
+      try {
+        unlinkSync(filepath);
+      } catch {}
       writeLog("error", { scope: "attachment", message: "Download error", fileId: file.id, error: (err as Error).message });
     }
   }
-  return paths;
+  return downloaded;
 }
 
 export async function fetchThreadContext(
@@ -84,13 +114,16 @@ export async function fetchThreadContext(
   }
 }
 
-const UPLOADABLE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "pdf"]);
+const UPLOADABLE_EXTENSIONS = new Set([
+  "png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "pdf",
+  "mp4", "mov", "m4v", "webm", "avi", "mkv", "mpg", "mpeg", "qt",
+]);
 
 /** Extract file paths from structured "📎 /path/to/file" lines in the result text. */
-export function extractImagePaths(text: string): string[] {
+export function extractAttachmentPaths(text: string): string[] {
   const paths: string[] = [];
   for (const line of text.split("\n")) {
-    const match = line.match(/^📎\s+(\/\S+)/);
+    const match = line.match(/^📎\s+(\/.+?)\s*$/);
     if (match && existsSync(match[1])) paths.push(match[1]);
   }
   return [...new Set(paths)];
@@ -113,11 +146,10 @@ export async function uploadFileToThread(
   if (!UPLOADABLE_EXTENSIONS.has(ext)) return;
 
   try {
-    const fileBuffer = readFileSync(filePath);
     await app.client.files.uploadV2({
       channel_id: channel,
       thread_ts: threadTs,
-      file: fileBuffer,
+      file: filePath,
       filename: basename(filePath),
       title: title || basename(filePath),
     });
@@ -133,4 +165,99 @@ export async function setTypingStatus(app: SlackApp, channel: string, threadTs: 
   } catch {
     // assistant.threads.setStatus may not be available — silently ignore
   }
+}
+
+function truncateTaskText(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars - 3)}...`;
+}
+
+function taskChunk(tool: ToolTrace, status: "in_progress" | "complete" | "error"): SlackStreamChunk {
+  return {
+    type: "task_update",
+    id: tool.id,
+    title: truncateTaskText(tool.name, 80),
+    status,
+    ...(tool.detail ? { details: truncateTaskText(tool.detail, 500) } : {}),
+  };
+}
+
+export type NativeTaskProgress = {
+  ts: string | null;
+  update(tool: ToolTrace, status: "in_progress" | "complete" | "error"): void;
+  stop(title: string): Promise<void>;
+};
+
+/** Render agent tool activity with Slack's native plan/task streaming UI. */
+export async function startNativeTaskProgress(
+  app: SlackApp,
+  channel: string,
+  threadTs: string,
+  recipientUserId: string,
+  recipientTeamId?: string,
+): Promise<NativeTaskProgress> {
+  let streamTs: string | null = null;
+  let stopped = false;
+  let queue = Promise.resolve();
+
+  try {
+    const response = await app.client.chat.startStream({
+      channel,
+      thread_ts: threadTs,
+      task_display_mode: "plan",
+      chunks: [{ type: "plan_update", title: "Working" }],
+      recipient_user_id: recipientUserId,
+      ...(recipientTeamId ? { recipient_team_id: recipientTeamId } : {}),
+    });
+    streamTs = response.ts || null;
+    if (!streamTs) throw new Error("chat.startStream returned no message timestamp");
+  } catch (err) {
+    writeLog("error", {
+      scope: "native-task-progress",
+      threadTs,
+      message: "Failed to start native task progress",
+      error: (err as Error).message,
+    });
+  }
+
+  return {
+    ts: streamTs,
+    update(tool, status) {
+      if (!streamTs || stopped) return;
+      queue = queue
+        .then(() => app.client.chat.appendStream({
+          channel,
+          ts: streamTs as string,
+          chunks: [taskChunk(tool, status)],
+        }))
+        .then(() => undefined)
+        .catch((err) => {
+          writeLog("error", {
+            scope: "native-task-progress",
+            threadTs,
+            message: "Failed to update native task progress",
+            error: (err as Error).message,
+          });
+        });
+    },
+    async stop(title) {
+      if (!streamTs || stopped) return;
+      stopped = true;
+      await queue;
+      try {
+        await app.client.chat.stopStream({
+          channel,
+          ts: streamTs,
+          chunks: [{ type: "plan_update", title }],
+        });
+      } catch (err) {
+        writeLog("error", {
+          scope: "native-task-progress",
+          threadTs,
+          message: "Failed to stop native task progress",
+          error: (err as Error).message,
+        });
+      }
+    },
+  };
 }

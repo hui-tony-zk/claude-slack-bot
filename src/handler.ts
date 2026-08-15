@@ -2,10 +2,10 @@ import { decodeSessionId, encodeSessionId, getProviderModel, runAgentQuery } fro
 import type { AgentProvider, BuiltPrompt, ToolTrace } from "./agents.js";
 import { AGENT_PROVIDER, DEFAULT_CWD, MAX_ERROR_DETAIL_CHARS } from "./config.js";
 import { handleCommand } from "./commands.js";
-import { buildCompletedTraceBlocks, buildProgressBlocks, formatResultBlocks } from "./formatting.js";
+import { formatElapsedMs, formatResultBlocks } from "./formatting.js";
 import { logThread, writeLog } from "./logger.js";
-import { downloadSlackFiles, extractImagePaths, fetchThreadContext, setTypingStatus, stripAttachmentLines, stripMention, uploadFileToThread } from "./slack.js";
-import type { BotEvent, SayFn, SlackApp } from "./types.js";
+import { downloadSlackFiles, extractAttachmentPaths, fetchThreadContext, setTypingStatus, startNativeTaskProgress, stripAttachmentLines, stripMention, uploadFileToThread } from "./slack.js";
+import type { BotEvent, BotEventEnvelope, SayFn, SlackApp } from "./types.js";
 
 type StateStore = ReturnType<typeof import("./state.js").createStateStore>;
 
@@ -16,26 +16,38 @@ async function buildPrompt(
   threadTs: string,
   hasSession: boolean
 ): Promise<BuiltPrompt> {
-  // Download image attachments
-  let attachmentNote = "";
+  // Download supported attachments. Images are passed as model inputs; videos remain local for tool-based processing.
+  const attachmentNotes: string[] = [];
   let imagePaths: string[] = [];
   if (event.files?.length) {
     const botToken = process.env.SLACK_BOT_TOKEN;
     if (botToken) {
-      imagePaths = await downloadSlackFiles(event.files, botToken);
+      const downloaded = await downloadSlackFiles(event.files, botToken);
+      imagePaths = downloaded.imagePaths;
       if (imagePaths.length > 0) {
-        attachmentNote = `\n\nThe user attached ${imagePaths.length} image(s):\n${imagePaths.map((p) => `- ${p}`).join("\n")}`;
+        attachmentNotes.push(`The user attached ${imagePaths.length} image(s):\n${imagePaths.map((p) => `- ${p}`).join("\n")}`);
         logThread(threadTs, "Downloaded image attachments", { count: imagePaths.length, paths: imagePaths });
+      }
+      if (downloaded.videoPaths.length > 0) {
+        attachmentNotes.push(
+          `The user attached ${downloaded.videoPaths.length} video(s), downloaded to local paths:\n${downloaded.videoPaths.map((p) => `- ${p}`).join("\n")}\nChoose how to inspect or process each video based on the user's request.`,
+        );
+        logThread(threadTs, "Downloaded video attachments", {
+          count: downloaded.videoPaths.length,
+          paths: downloaded.videoPaths,
+        });
       }
     }
   }
+  const attachmentNote = attachmentNotes.length ? `\n\n${attachmentNotes.join("\n\n")}` : "";
+  const requestText = text.trim() || "The user sent attachment(s) without additional instructions. Ask what they want done with them.";
 
   // Fetch missed thread messages
-  let prompt = text + attachmentNote;
+  let prompt = requestText + attachmentNote;
   if (event.thread_ts) {
     const threadContext = await fetchThreadContext(app, event.channel, threadTs, event.ts, hasSession);
     if (threadContext) {
-      prompt = `${threadContext}\n\n---\n\nUser's request: ${text}${attachmentNote}`;
+      prompt = `${threadContext}\n\n---\n\nUser's request: ${requestText}${attachmentNote}`;
       logThread(threadTs, "Prepended thread context to prompt", { hasSession });
     }
   }
@@ -44,7 +56,15 @@ async function buildPrompt(
 }
 
 export function createMessageHandler(app: SlackApp, state: StateStore) {
-  return async function handleMessage({ event, say }: { event: BotEvent; say: SayFn }): Promise<void> {
+  return async function handleMessage({
+    event,
+    body,
+    say,
+  }: {
+    event: BotEvent;
+    body?: BotEventEnvelope;
+    say: SayFn;
+  }): Promise<void> {
     const threadTs = event.thread_ts || event.ts;
     const text = stripMention(event.text);
     const user = event.user;
@@ -56,7 +76,7 @@ export function createMessageHandler(app: SlackApp, state: StateStore) {
       slackTs: event.ts,
     });
 
-    if (!text.trim()) {
+    if (!text.trim() && !event.files?.length) {
       await say({ text: "Give me a task!", thread_ts: threadTs });
       logThread(threadTs, "Rejected empty message");
       return;
@@ -88,68 +108,48 @@ export function createMessageHandler(app: SlackApp, state: StateStore) {
     await setTypingStatus(app, event.channel, threadTs, "is thinking...");
 
     const queryStartTime = Date.now();
-    const thinking = await say({
-      text: "Working",
-      blocks: buildProgressBlocks([], null, queryStartTime),
-      thread_ts: threadTs,
-    });
-    logThread(threadTs, "Posted thinking message", { thinkingTs: thinking.ts });
-    state.updateActiveQuery(threadTs, { phase: "running", thinkingTs: thinking.ts });
+    const progress = await startNativeTaskProgress(
+      app,
+      event.channel,
+      threadTs,
+      user,
+      body?.enterprise_id || body?.team_id,
+    );
+    logThread(threadTs, "Started native task progress", { progressTs: progress.ts });
+    state.updateActiveQuery(threadTs, { phase: "running", thinkingTs: progress.ts });
 
     let sessionId = existingSessionId;
     const completedTools: ToolTrace[] = [];
     let currentTool: ToolTrace | null = null;
-    let lastTool: ToolTrace | null = null;
-
-    const progressTimer = setInterval(async () => {
-      try {
-        await app.client.chat.update({
-          channel: event.channel,
-          ts: thinking.ts,
-          text: "Working",
-          blocks: buildProgressBlocks(completedTools, currentTool, queryStartTime, lastTool),
-        });
-      } catch {}
-    }, 5000);
 
     try {
       const prompt = await buildPrompt(app, event, text, threadTs, !!existingSessionId);
-      let lastProgressUpdate = 0;
       const onSession = (newSessionId: string) => {
         sessionId = newSessionId;
         state.updateActiveQuery(threadTs, { sessionId, phase: "initialized" });
       };
       const onTool = (tool: ToolTrace | null, completedTool?: ToolTrace) => {
-        if (currentTool && completedTool === undefined && provider === "claude") {
+        if (currentTool && completedTool === undefined && provider === "claude" && tool?.id !== currentTool.id) {
           completedTools.push(currentTool);
+          progress.update(currentTool, "complete");
         }
-        if (completedTool) completedTools.push(completedTool);
-        if (tool) lastTool = tool;
-        else if (completedTool) lastTool = completedTool;
+        if (completedTool) {
+          completedTools.push(completedTool);
+          progress.update(completedTool, "complete");
+        }
         currentTool = tool;
-      };
-      const updateProgress = async () => {
-        const now = Date.now();
-        if (now - lastProgressUpdate < 2000) return;
-        lastProgressUpdate = now;
-        try {
-          const statusText = currentTool ? `is running ${currentTool.name}...` : "is thinking...";
-          await setTypingStatus(app, event.channel, threadTs, statusText);
-          await app.client.chat.update({
-            channel: event.channel,
-            ts: thinking.ts,
-            text: "Working",
-            blocks: buildProgressBlocks(completedTools, currentTool, queryStartTime, lastTool),
-          });
-          state.updateActiveQuery(threadTs, {
-            phase: currentTool ? `tool:${currentTool.name}` : "running",
-            currentTool,
-            completedTools: completedTools.slice(-10),
-            lastProgressAt: new Date(now).toISOString(),
-          });
-        } catch (err) {
-          logThread(threadTs, "Progress update failed", { error: (err as Error).message });
+        if (tool) {
+          progress.update(tool, "in_progress");
         }
+        const now = Date.now();
+        const statusText = currentTool ? `is running ${currentTool.name}...` : "is thinking...";
+        void setTypingStatus(app, event.channel, threadTs, statusText);
+        state.updateActiveQuery(threadTs, {
+          phase: currentTool ? `tool:${currentTool.name}` : "running",
+          currentTool,
+          completedTools: completedTools.slice(-10),
+          lastProgressAt: new Date(now).toISOString(),
+        });
       };
 
       const resultText = await runAgentQuery(provider, {
@@ -158,13 +158,8 @@ export function createMessageHandler(app: SlackApp, state: StateStore) {
         existingSessionId,
         threadTs,
         onSession,
-        onTool: (...args) => {
-          onTool(...args);
-          void updateProgress();
-        },
+        onTool,
       });
-
-      clearInterval(progressTimer);
 
       if (sessionId) {
         state.threadSessions.set(threadTs, encodeSessionId(provider, sessionId));
@@ -173,6 +168,7 @@ export function createMessageHandler(app: SlackApp, state: StateStore) {
 
       if (currentTool) {
         completedTools.push(currentTool);
+        progress.update(currentTool, "complete");
         currentTool = null;
       }
 
@@ -186,16 +182,10 @@ export function createMessageHandler(app: SlackApp, state: StateStore) {
       const elapsedMs = Date.now() - queryStartTime;
 
       await setTypingStatus(app, event.channel, threadTs, "");
-
-      await app.client.chat.update({
-        channel: event.channel,
-        ts: thinking.ts,
-        text: "Done",
-        blocks: buildCompletedTraceBlocks(completedTools, elapsedMs),
-      });
+      await progress.stop(`Done (${formatElapsedMs(elapsedMs)})`);
 
       // Extract and upload any attached files before posting the text
-      const imagePaths = extractImagePaths(resultText);
+      const attachmentPaths = extractAttachmentPaths(resultText);
       const cleanedResult = stripAttachmentLines(resultText);
 
       const fallbackText = cleanedResult || "(no output)";
@@ -206,19 +196,23 @@ export function createMessageHandler(app: SlackApp, state: StateStore) {
       });
       logThread(threadTs, "Posted result as new message", {
         channel: event.channel,
-        thinkingTs: thinking.ts,
+        progressTs: progress.ts,
         text: fallbackText,
       });
 
-      if (imagePaths.length > 0) {
-        logThread(threadTs, "Uploading images from result", { count: imagePaths.length, paths: imagePaths });
-        for (const imgPath of imagePaths) {
-          await uploadFileToThread(app, event.channel, threadTs, imgPath);
+      if (attachmentPaths.length > 0) {
+        logThread(threadTs, "Uploading attachments from result", {
+          count: attachmentPaths.length,
+          paths: attachmentPaths,
+        });
+        for (const attachmentPath of attachmentPaths) {
+          await uploadFileToThread(app, event.channel, threadTs, attachmentPath);
         }
       }
     } catch (err) {
-      clearInterval(progressTimer);
       await setTypingStatus(app, event.channel, threadTs, "");
+      if (currentTool) progress.update(currentTool, "error");
+      await progress.stop("Failed");
       const detail = [String((err as any).stderr || ""), String((err as any).stdout || "")]
         .filter(Boolean)
         .join("\n")
@@ -238,15 +232,9 @@ export function createMessageHandler(app: SlackApp, state: StateStore) {
         detail: errorDetail,
       });
       const errMsg = `:x: Failed: ${(err as Error).message}${errorDetail ? `\n\`\`\`${errorDetail.slice(0, 300)}\`\`\`` : ""}`;
-      await app.client.chat.update({
+      await say({ text: errMsg, thread_ts: threadTs });
+      logThread(threadTs, "Posted Slack failure reply", {
         channel: event.channel,
-        ts: thinking.ts,
-        text: errMsg,
-        blocks: [{ type: "section", text: { type: "mrkdwn", text: errMsg } }],
-      });
-      logThread(threadTs, "Updated Slack reply with failure", {
-        channel: event.channel,
-        slackTs: thinking.ts,
         error: (err as Error).message,
         detail: errorDetail,
       });

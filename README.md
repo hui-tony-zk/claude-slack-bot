@@ -1,6 +1,6 @@
 # Agent Slack Bot
 
-Slack bot that runs Codex or Claude Code sessions. Codex via the [Codex SDK](https://github.com/openai/codex/tree/main/sdk/typescript) is the default; Claude remains available via the [Claude Agent SDK](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk). DM it or @mention it in threads.
+Slack agent that runs Codex or Claude Code sessions. Codex via the [Codex SDK](https://github.com/openai/codex/tree/main/sdk/typescript) is the default; Claude remains available via the [Claude Agent SDK](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk). Open it from Slack's agent entry point, DM it, or @mention it in threads.
 
 ## Setup
 
@@ -11,6 +11,8 @@ npm run dev            # dev mode (auto-restart on file changes)
 npm start              # production
 ./restart-bot.sh       # restart as background daemon
 ```
+
+Import [`manifest.json`](./manifest.json) into the Slack app configuration, create an app-level token with `connections:write`, and reinstall the app after adding the declared bot scopes. The manifest enables Slack's `agent_view` while preserving DM and `@mention` events.
 
 ### Required env vars
 
@@ -26,27 +28,33 @@ npm start              # production
 | `CODEX_MODEL_REASONING_EFFORT` | Codex reasoning effort: `minimal`, `low`, `medium`, `high`, or `xhigh` (default: `high`) |
 | `CODEX_SANDBOX_MODE` | Optional sandbox mode (default: `danger-full-access`) |
 | `CODEX_APPROVAL_POLICY` | Optional approval policy (default: `never`) |
+| `CODEX_PATH` | Codex CLI executable (default: `codex` from `PATH`) |
 
 ## Features
 
-- **DM or @mention** — responds in DMs and when tagged in threads
+- **Native Slack agent** — available from Slack's agent entry point and Messages tab
+- **DM or @mention** — responds in agent DMs and when tagged in channel threads
 - **Thread context** — fetches messages since last bot reply when tagged mid-thread
 - **Provider switching** — set `AGENT_PROVIDER=codex` or `AGENT_PROVIDER=claude`
 - **Session persistence** — resumes sessions across messages in the same thread; survives bot restarts
 - **Image attachments** — downloads images from Slack and passes them to the active provider
-- **Progress tracking** — updates Slack message with tool execution trace
+- **Video attachments** — downloads videos locally so the agent can choose request-specific processing
+- **File delivery** — uploads agent-produced images, PDFs, and videos back into the Slack thread
+- **Progress tracking** — renders tool execution as native Slack plan/task updates
 - **Typing indicator** — native Slack status via `assistant.threads.setStatus`
 - **Crash recovery** — automatically restarts after crashes (non-zero exit), stops cleanly on intentional shutdown
 - **Restart confirmation** — posts confirmation after `/restart`
 
-### Slash commands (in Slack)
+### Commands (in Slack)
 
-| Command | Effect |
-|---------|--------|
-| `/status` | Show active/interrupted queries |
-| `/cwd <path>` | Set working directory for thread |
-| `/new` | Clear session, start fresh |
-| `/restart` | Restart bot process |
+Slack does not deliver slash commands from agent threads. Use the `!` forms in the agent interface; the legacy `/` forms remain supported wherever Slack delivers them as messages.
+
+| Agent command | Legacy form | Effect |
+|---------------|-------------|--------|
+| `!status` | `/status` | Show active/interrupted queries |
+| `!cwd <path>` | `/cwd <path>` | Set working directory for thread |
+| `!new` | `/new` | Clear session, start fresh |
+| `!restart` | `/restart` | Restart bot process |
 
 ## File structure
 

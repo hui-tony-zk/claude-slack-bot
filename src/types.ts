@@ -18,8 +18,8 @@ export type ActiveQuery = {
   thinkingTs?: string | null;
   phase?: string;
   provider?: string;
-  currentTool?: { name: string; detail: string };
-  completedTools?: Array<{ name: string; detail: string }>;
+  currentTool?: { id: string; name: string; detail: string };
+  completedTools?: Array<{ id: string; name: string; detail: string }>;
   lastProgressAt?: string;
   interruptedAt?: string;
   reason?: string;
@@ -47,6 +47,11 @@ export type BotEvent = {
   files?: SlackFile[];
 };
 
+export type BotEventEnvelope = {
+  team_id?: string;
+  enterprise_id?: string;
+};
+
 export type SayArgs = {
   text: string;
   thread_ts: string;
@@ -64,6 +69,16 @@ export type SlackApp = {
       };
     };
     chat: {
+      startStream(args: {
+        channel: string;
+        thread_ts: string;
+        task_display_mode: "plan";
+        chunks: SlackStreamChunk[];
+        recipient_team_id?: string;
+        recipient_user_id?: string;
+      }): Promise<{ ts?: string }>;
+      appendStream(args: { channel: string; ts: string; chunks: SlackStreamChunk[] }): Promise<unknown>;
+      stopStream(args: { channel: string; ts: string; chunks?: SlackStreamChunk[] }): Promise<unknown>;
       postMessage(args: { channel: string; thread_ts: string; text: string }): Promise<unknown>;
       update(args: { channel: string; ts: string; text: string; blocks?: unknown[] }): Promise<unknown>;
     };
@@ -76,10 +91,20 @@ export type SlackApp = {
       uploadV2(args: {
         channel_id: string;
         thread_ts: string;
-        file: Buffer;
+        file: Buffer | string;
         filename: string;
         title?: string;
       }): Promise<unknown>;
     };
   };
 };
+
+export type SlackStreamChunk =
+  | { type: "plan_update"; title: string }
+  | {
+      type: "task_update";
+      id: string;
+      title: string;
+      status: "pending" | "in_progress" | "complete" | "error";
+      details?: string;
+    };

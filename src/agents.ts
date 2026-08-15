@@ -13,7 +13,7 @@ export type BuiltPrompt = {
   imagePaths: string[];
 };
 
-export type ToolTrace = { name: string; detail: string };
+export type ToolTrace = { id: string; name: string; detail: string };
 
 type RunAgentArgs = {
   prompt: BuiltPrompt;
@@ -76,21 +76,19 @@ function getModelReasoningEffort(): ModelReasoningEffort | undefined {
 function codexItemToTool(item: ThreadItem): ToolTrace | null {
   switch (item.type) {
     case "command_execution":
-      return { name: "Bash", detail: item.command };
+      return { id: item.id, name: "Bash", detail: item.command };
     case "file_change": {
       const paths = item.changes.map((change) => change.path.split("/").pop() || change.path);
-      return { name: "Patch", detail: paths.slice(0, 3).join(", ") };
+      return { id: item.id, name: "Patch", detail: paths.slice(0, 3).join(", ") };
     }
     case "mcp_tool_call":
-      return { name: `${item.server}:${item.tool}`, detail: formatToolDetail(item.tool, item.arguments as Record<string, unknown>) };
+      return { id: item.id, name: `${item.server}:${item.tool}`, detail: formatToolDetail(item.tool, item.arguments as Record<string, unknown>) };
     case "web_search":
-      return { name: "WebSearch", detail: item.query };
+      return { id: item.id, name: "WebSearch", detail: item.query };
     case "todo_list": {
       const completed = item.items.filter((todo) => todo.completed).length;
-      return { name: "Todo", detail: `${completed}/${item.items.length}` };
+      return { id: item.id, name: "Todo", detail: `${completed}/${item.items.length}` };
     }
-    case "error":
-      return { name: "Error", detail: item.message };
     default:
       return null;
   }
@@ -107,7 +105,7 @@ function buildCodexInput(prompt: BuiltPrompt): Input {
 
 async function runCodexQuery(args: RunAgentArgs): Promise<string> {
   let resultText = "";
-  const codex = new Codex();
+  const codex = new Codex({ codexPathOverride: process.env.CODEX_PATH || "codex" });
   const threadOptions = {
     model: DEFAULT_MODEL,
     workingDirectory: args.cwd,
@@ -188,6 +186,7 @@ async function runClaudeQuery(args: RunAgentArgs): Promise<string> {
       for (const block of content) {
         if (block.type !== "tool_use") continue;
         args.onTool({
+          id: block.id,
           name: block.name,
           detail: formatToolDetail(block.name, block.input as Record<string, unknown>),
         });

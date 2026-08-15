@@ -15,7 +15,7 @@ export async function handleCommand(
   say: SayFn,
   state: StateStore
 ): Promise<CommandResult> {
-  if (text === "/status") {
+  if (text === "/status" || text === "!status") {
     const statusText = state.formatStatusText();
     logThread(threadTs, "Reported status snapshot", {
       activeCount: state.activeQueries.size,
@@ -25,7 +25,7 @@ export async function handleCommand(
     return { handled: true };
   }
 
-  const cwdMatch = text.match(/^\/cwd\s+(.+)/);
+  const cwdMatch = text.match(/^(?:\/cwd|!cwd)\s+(.+)/);
   if (cwdMatch) {
     const newCwd = cwdMatch[1].trim();
     state.threadCwd.set(threadTs, newCwd);
@@ -35,7 +35,7 @@ export async function handleCommand(
     return { handled: true };
   }
 
-  if (text === "/new") {
+  if (text === "/new" || text === "!new") {
     state.threadSessions.delete(threadTs);
     state.saveSessions();
     logThread(threadTs, "Session cleared by user");
@@ -43,7 +43,7 @@ export async function handleCommand(
     return { handled: true };
   }
 
-  if (text === "/restart") {
+  if (text === "/restart" || text === "!restart") {
     await say({ text: ":arrows_counterclockwise: Restarting bot...", thread_ts: threadTs });
     logThread(threadTs, "User requested restart via /restart", { channel });
     writeFileSync(
