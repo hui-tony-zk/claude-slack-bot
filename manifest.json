@@ -10,7 +10,7 @@
       "messages_tab_read_only_enabled": false
     },
     "agent_view": {
-      "agent_description": "Run coding tasks with Codex or Claude while preserving each conversation as a Slack thread."
+      "agent_description": "edits your videos"
     },
     "bot_user": {
       "display_name": "agent-slack-bot",

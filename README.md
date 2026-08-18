@@ -28,7 +28,7 @@ Import [`manifest.json`](./manifest.json) into the Slack app configuration, crea
 | `CODEX_MODEL_REASONING_EFFORT` | Codex reasoning effort: `minimal`, `low`, `medium`, `high`, or `xhigh` (default: `high`) |
 | `CODEX_SANDBOX_MODE` | Optional sandbox mode (default: `danger-full-access`) |
 | `CODEX_APPROVAL_POLICY` | Optional approval policy (default: `never`) |
-| `CODEX_PATH` | Codex CLI executable (default: `codex` from `PATH`) |
+| `CODEX_PATH` | Optional Codex CLI override; unset uses the CLI runtime bundled with `@openai/codex-sdk` |
 
 ## Features
 

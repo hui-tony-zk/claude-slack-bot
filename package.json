@@ -6,6 +6,7 @@
   "scripts": {
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
+    "test": "tsx --test src/**/*.test.ts",
     "typecheck": "tsc -p tsconfig.json",
     "restart": "./restart-bot.sh"
   },
@@ -15,7 +16,7 @@
   "description": "",
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.74",
-    "@openai/codex-sdk": "^0.130.0",
+    "@openai/codex-sdk": "^0.147.0",
     "@slack/bolt": "^5.0.0",
     "dotenv": "^17.3.1"
   },

@@ -3,7 +3,7 @@ import type { AgentProvider, BuiltPrompt, ToolTrace } from "./agents.js";
 import { AGENT_PROVIDER, DEFAULT_CWD, MAX_ERROR_DETAIL_CHARS } from "./config.js";
 import { handleCommand } from "./commands.js";
 import { formatElapsedMs, formatResultBlocks } from "./formatting.js";
-import { logThread, writeLog } from "./logger.js";
+import { logThread, serializeError, writeLog } from "./logger.js";
 import { downloadSlackFiles, extractAttachmentPaths, fetchThreadContext, setTypingStatus, startNativeTaskProgress, stripAttachmentLines, stripMention, uploadFileToThread } from "./slack.js";
 import type { BotEvent, BotEventEnvelope, SayFn, SlackApp } from "./types.js";
 
@@ -128,17 +128,21 @@ export function createMessageHandler(app: SlackApp, state: StateStore) {
         sessionId = newSessionId;
         state.updateActiveQuery(threadTs, { sessionId, phase: "initialized" });
       };
-      const onTool = (tool: ToolTrace | null, completedTool?: ToolTrace) => {
+      const onTool = (
+        tool: ToolTrace | null,
+        completedTool?: ToolTrace,
+        completedStatus: "complete" | "error" = "complete",
+      ) => {
         if (currentTool && completedTool === undefined && provider === "claude" && tool?.id !== currentTool.id) {
           completedTools.push(currentTool);
           progress.update(currentTool, "complete");
         }
         if (completedTool) {
           completedTools.push(completedTool);
-          progress.update(completedTool, "complete");
+          if (provider === "claude") progress.update(completedTool, completedStatus);
         }
         currentTool = tool;
-        if (tool) {
+        if (tool && provider === "claude") {
           progress.update(tool, "in_progress");
         }
         const now = Date.now();
@@ -159,6 +163,7 @@ export function createMessageHandler(app: SlackApp, state: StateStore) {
         threadTs,
         onSession,
         onTool,
+        onAgentMessage: (id, message) => progress.addMessage(id, message),
       });
 
       if (sessionId) {
@@ -168,7 +173,7 @@ export function createMessageHandler(app: SlackApp, state: StateStore) {
 
       if (currentTool) {
         completedTools.push(currentTool);
-        progress.update(currentTool, "complete");
+        if (provider === "claude") progress.update(currentTool, "complete");
         currentTool = null;
       }
 
@@ -211,7 +216,7 @@ export function createMessageHandler(app: SlackApp, state: StateStore) {
       }
     } catch (err) {
       await setTypingStatus(app, event.channel, threadTs, "");
-      if (currentTool) progress.update(currentTool, "error");
+      if (currentTool && provider === "claude") progress.update(currentTool, "error");
       await progress.stop("Failed");
       const detail = [String((err as any).stderr || ""), String((err as any).stdout || "")]
         .filter(Boolean)
@@ -222,8 +227,15 @@ export function createMessageHandler(app: SlackApp, state: StateStore) {
         scope: "thread",
         threadTs,
         message: `${provider} query failed`,
-        error: (err as Error).message,
+        error: serializeError(err),
         detail: errorDetail,
+        provider,
+        model: providerModel || null,
+        cwd,
+        sessionId: sessionId || null,
+        elapsedMs: Date.now() - queryStartTime,
+        phase: currentTool ? `tool:${currentTool.name}` : "running",
+        completedToolCount: completedTools.length,
       });
       state.failActiveQuery(threadTs, {
         sessionId,

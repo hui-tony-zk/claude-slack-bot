@@ -185,6 +185,7 @@ function taskChunk(tool: ToolTrace, status: "in_progress" | "complete" | "error"
 export type NativeTaskProgress = {
   ts: string | null;
   update(tool: ToolTrace, status: "in_progress" | "complete" | "error"): void;
+  addMessage(id: string, text: string): void;
   stop(title: string): Promise<void>;
 };
 
@@ -199,6 +200,9 @@ export async function startNativeTaskProgress(
   let streamTs: string | null = null;
   let stopped = false;
   let queue = Promise.resolve();
+  let lastTask: { id: string; title: string } | null = null;
+  const displayIds = new Map<string, string>();
+  const lastTaskState = new Map<string, string>();
 
   try {
     const response = await app.client.chat.startStream({
@@ -224,11 +228,21 @@ export async function startNativeTaskProgress(
     ts: streamTs,
     update(tool, status) {
       if (!streamTs || stopped) return;
+      let displayId = displayIds.get(tool.id);
+      if (!displayId) {
+        displayId = lastTask?.title === tool.name ? lastTask.id : tool.id;
+        displayIds.set(tool.id, displayId);
+      }
+      const displayTool = displayId === tool.id ? tool : { ...tool, id: displayId };
+      const signature = `${status}\n${displayTool.name}\n${displayTool.detail}`;
+      if (lastTaskState.get(displayId) === signature) return;
+      lastTaskState.set(displayId, signature);
+      lastTask = { id: displayId, title: displayTool.name };
       queue = queue
         .then(() => app.client.chat.appendStream({
           channel,
           ts: streamTs as string,
-          chunks: [taskChunk(tool, status)],
+          chunks: [taskChunk(displayTool, status)],
         }))
         .then(() => undefined)
         .catch((err) => {
@@ -236,6 +250,35 @@ export async function startNativeTaskProgress(
             scope: "native-task-progress",
             threadTs,
             message: "Failed to update native task progress",
+            error: (err as Error).message,
+          });
+        });
+    },
+    addMessage(id, text) {
+      if (!streamTs || stopped) return;
+      const normalized = text
+        .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+        .replace(/[*_`#>]/g, "")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (!normalized) return;
+      const messageTask: ToolTrace = {
+        id: `message:${id}`,
+        name: truncateTaskText(normalized, 120),
+        detail: "",
+      };
+      queue = queue
+        .then(() => app.client.chat.appendStream({
+          channel,
+          ts: streamTs as string,
+          chunks: [taskChunk(messageTask, "complete")],
+        }))
+        .then(() => undefined)
+        .catch((err) => {
+          writeLog("error", {
+            scope: "native-task-progress",
+            threadTs,
+            message: "Failed to add native progress message",
             error: (err as Error).message,
           });
         });

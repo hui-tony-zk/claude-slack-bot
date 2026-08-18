@@ -3,7 +3,7 @@ import { Codex } from "@openai/codex-sdk";
 import type { ApprovalMode, Input, ModelReasoningEffort, SandboxMode, ThreadItem } from "@openai/codex-sdk";
 import { CLAUDE_MODEL, CODEX_MODEL_REASONING_EFFORT, DEFAULT_MODEL, MAX_TURNS } from "./config.js";
 import { formatToolDetail } from "./formatting.js";
-import { logThread, writeLog } from "./logger.js";
+import { logThread, serializeError, writeLog } from "./logger.js";
 import { SYSTEM_PROMPT } from "./prompt.js";
 
 export type AgentProvider = "codex" | "claude";
@@ -21,7 +21,12 @@ type RunAgentArgs = {
   existingSessionId: string | undefined;
   threadTs: string;
   onSession: (sessionId: string) => void;
-  onTool: (tool: ToolTrace | null, completedTool?: ToolTrace) => void;
+  onTool: (
+    tool: ToolTrace | null,
+    completedTool?: ToolTrace,
+    completedStatus?: "complete" | "error",
+  ) => void;
+  onAgentMessage?: (id: string, text: string) => void;
 };
 
 const CODEX_SESSION_PREFIX = "codex:";
@@ -29,6 +34,26 @@ const CLAUDE_SESSION_PREFIX = "claude:";
 const VALID_SANDBOX_MODES = new Set<SandboxMode>(["read-only", "workspace-write", "danger-full-access"]);
 const VALID_APPROVAL_MODES = new Set<ApprovalMode>(["never", "on-request", "on-failure", "untrusted"]);
 const VALID_REASONING_EFFORTS = new Set<ModelReasoningEffort>(["minimal", "low", "medium", "high", "xhigh"]);
+const MAX_CODEX_ATTEMPTS = 2;
+const CODEX_RETRY_DELAY_MS = 1_000;
+const RETRYABLE_CODEX_DISCONNECT = /stream disconnected before completion|websocket closed by server before response\.completed/i;
+
+export function shouldRetryCodexTurn(error: unknown, attempt: number, sideEffectEventCount: number): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return attempt < MAX_CODEX_ATTEMPTS
+    && sideEffectEventCount === 0
+    && RETRYABLE_CODEX_DISCONNECT.test(message);
+}
+
+function isPotentiallySideEffectingItem(item: ThreadItem): boolean {
+  return item.type === "command_execution"
+    || item.type === "file_change"
+    || item.type === "mcp_tool_call";
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 export function encodeSessionId(provider: AgentProvider, sessionId: string): string {
   return `${provider === "codex" ? CODEX_SESSION_PREFIX : CLAUDE_SESSION_PREFIX}${sessionId}`;
@@ -73,25 +98,87 @@ function getModelReasoningEffort(): ModelReasoningEffort | undefined {
   return effort && VALID_REASONING_EFFORTS.has(effort) ? effort : undefined;
 }
 
+function humanizeIdentifier(value: string): string {
+  return value
+    .replace(/^mcp__/, "")
+    .replace(/[_:-]+/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase())
+    .trim();
+}
+
+function humanizeCommand(command: string): string {
+  const normalized = command.toLowerCase();
+  if (normalized.includes("ffprobe")) return "Inspecting the video";
+  if (normalized.includes("ffmpeg")) return "Preparing the video";
+  if (/\b(vitest|jest|pytest|npm test|pnpm test|npm run typecheck)\b/.test(normalized)) return "Checking the result";
+  if (/\bgit\s+(diff|status|show)\b/.test(normalized)) return "Reviewing changes";
+  if (normalized.includes("/downloads") && /\bfind\b/.test(normalized)) return "Finding downloaded media";
+  if (/\b(rg|grep)\b/.test(normalized)) return "Searching local files";
+  if (/\b(find|fd)\b/.test(normalized)) return "Finding local files";
+  if (/\b(sed|cat|head|tail)\b/.test(normalized)) return "Reading local files";
+  return "Running a local tool";
+}
+
+function humanizeMcpTool(server: string, tool: string, rawArguments: unknown): ToolTrace["name"] {
+  const args = rawArguments && typeof rawArguments === "object"
+    ? rawArguments as Record<string, unknown>
+    : {};
+  if (typeof args.title === "string" && args.title.trim()) return args.title.trim();
+
+  const key = `${server}:${tool}`.toLowerCase();
+  if (key.includes("node_repl") || key.includes("browser") || key.includes("chrome")) return "Using the browser";
+  if (key.includes("video_watch") || key.includes("video_understanding")) return "Understanding the video";
+  if (key.includes("process_video")) return "Analyzing the video";
+  if (key.includes("web") && key.includes("search")) return "Searching the web";
+  return humanizeIdentifier(tool) || "Using a connected tool";
+}
+
 function codexItemToTool(item: ThreadItem): ToolTrace | null {
   switch (item.type) {
     case "command_execution":
-      return { id: item.id, name: "Bash", detail: item.command };
+      return { id: item.id, name: humanizeCommand(item.command), detail: "" };
     case "file_change": {
       const paths = item.changes.map((change) => change.path.split("/").pop() || change.path);
-      return { id: item.id, name: "Patch", detail: paths.slice(0, 3).join(", ") };
+      const singleChange = item.changes.length === 1 ? item.changes[0] : null;
+      const verb = singleChange?.kind === "add" ? "Creating" : singleChange?.kind === "delete" ? "Removing" : "Updating";
+      return {
+        id: item.id,
+        name: singleChange ? `${verb} ${paths[0]}` : `Updating ${item.changes.length} files`,
+        detail: singleChange ? "" : paths.slice(0, 3).join(", "),
+      };
     }
-    case "mcp_tool_call":
-      return { id: item.id, name: `${item.server}:${item.tool}`, detail: formatToolDetail(item.tool, item.arguments as Record<string, unknown>) };
+    case "mcp_tool_call": {
+      const args = item.arguments && typeof item.arguments === "object"
+        ? item.arguments as Record<string, unknown>
+        : {};
+      const hasTitle = typeof args.title === "string" && args.title.trim().length > 0;
+      return {
+        id: item.id,
+        name: humanizeMcpTool(item.server, item.tool, item.arguments),
+        detail: hasTitle ? "" : formatToolDetail(item.tool, args),
+      };
+    }
     case "web_search":
-      return { id: item.id, name: "WebSearch", detail: item.query };
+      return { id: item.id, name: "Searching the web", detail: item.query };
     case "todo_list": {
       const completed = item.items.filter((todo) => todo.completed).length;
-      return { id: item.id, name: "Todo", detail: `${completed}/${item.items.length}` };
+      const current = item.items.find((todo) => !todo.completed);
+      return {
+        id: item.id,
+        name: current?.text || "Plan complete",
+        detail: `${completed}/${item.items.length} steps complete`,
+      };
     }
     default:
       return null;
   }
+}
+
+function completedToolStatus(item: ThreadItem): "complete" | "error" {
+  if (item.type === "command_execution" || item.type === "file_change" || item.type === "mcp_tool_call") {
+    return item.status === "failed" ? "error" : "complete";
+  }
+  return "complete";
 }
 
 function buildCodexInput(prompt: BuiltPrompt): Input {
@@ -104,8 +191,8 @@ function buildCodexInput(prompt: BuiltPrompt): Input {
 }
 
 async function runCodexQuery(args: RunAgentArgs): Promise<string> {
-  let resultText = "";
-  const codex = new Codex({ codexPathOverride: process.env.CODEX_PATH || "codex" });
+  const codexPathOverride = process.env.CODEX_PATH?.trim() || undefined;
+  const codex = new Codex(codexPathOverride ? { codexPathOverride } : {});
   const threadOptions = {
     model: DEFAULT_MODEL,
     workingDirectory: args.cwd,
@@ -114,40 +201,125 @@ async function runCodexQuery(args: RunAgentArgs): Promise<string> {
     skipGitRepoCheck: true,
     modelReasoningEffort: getModelReasoningEffort(),
   };
-  const thread = args.existingSessionId
-    ? codex.resumeThread(args.existingSessionId, threadOptions)
-    : codex.startThread(threadOptions);
-  const { events } = await thread.runStreamed(buildCodexInput(args.prompt));
-  const runningTools = new Map<string, ToolTrace>();
+  let activeSessionId = args.existingSessionId;
 
-  for await (const message of events) {
-    if (message.type === "thread.started") {
-      args.onSession(message.thread_id);
-      logThread(args.threadTs, "Codex session initialized", { sessionId: message.thread_id });
-    }
+  for (let attempt = 1; attempt <= MAX_CODEX_ATTEMPTS; attempt += 1) {
+    let resultText = "";
+    let itemEventCount = 0;
+    let sideEffectEventCount = 0;
+    let eventCount = 0;
+    let turnCompleted = false;
+    let lastStreamError: string | null = null;
+    const eventTypeCounts: Record<string, number> = {};
+    const itemTypeCounts: Record<string, number> = {};
+    const runningTools = new Map<string, ToolTrace>();
+    const attemptStartedAt = Date.now();
+    const thread = activeSessionId
+      ? codex.resumeThread(activeSessionId, threadOptions)
+      : codex.startThread(threadOptions);
 
-    if (message.type === "item.started" || message.type === "item.updated") {
-      const tool = codexItemToTool(message.item);
-      if (tool) {
-        runningTools.set(message.item.id, tool);
-        args.onTool(tool);
+    try {
+      const { events } = await thread.runStreamed(buildCodexInput(args.prompt));
+      for await (const message of events) {
+        eventCount += 1;
+        eventTypeCounts[message.type] = (eventTypeCounts[message.type] || 0) + 1;
+
+        if (message.type === "thread.started") {
+          activeSessionId = message.thread_id;
+          args.onSession(message.thread_id);
+          logThread(args.threadTs, "Codex session initialized", { sessionId: message.thread_id, attempt });
+        }
+
+        if (message.type === "item.started" || message.type === "item.updated") {
+          itemEventCount += 1;
+          itemTypeCounts[message.item.type] = (itemTypeCounts[message.item.type] || 0) + 1;
+          if (isPotentiallySideEffectingItem(message.item)) sideEffectEventCount += 1;
+          const tool = codexItemToTool(message.item);
+          if (tool) {
+            runningTools.set(message.item.id, tool);
+            args.onTool(tool);
+          }
+        }
+
+        if (message.type === "item.completed") {
+          itemEventCount += 1;
+          itemTypeCounts[message.item.type] = (itemTypeCounts[message.item.type] || 0) + 1;
+          if (isPotentiallySideEffectingItem(message.item)) sideEffectEventCount += 1;
+          if (message.item.type === "agent_message") {
+            resultText = message.item.text || resultText;
+            if (message.item.text.trim()) args.onAgentMessage?.(message.item.id, message.item.text.trim());
+          }
+          const tool = codexItemToTool(message.item);
+          if (tool) {
+            runningTools.delete(message.item.id);
+            args.onTool(
+              Array.from(runningTools.values()).at(-1) || null,
+              tool,
+              completedToolStatus(message.item),
+            );
+          }
+        }
+
+        if (message.type === "turn.completed") turnCompleted = true;
+        if (message.type === "turn.failed") throw new Error(message.error.message);
+        if (message.type === "error") {
+          lastStreamError = message.message;
+          writeLog("error", {
+            scope: "codex-stream",
+            threadTs: args.threadTs,
+            message: "Codex stream diagnostic; waiting for terminal turn event",
+            attempt,
+            sessionId: activeSessionId || null,
+            streamError: message.message,
+            eventCount,
+            itemEventCount,
+            sideEffectEventCount,
+          });
+        }
       }
-    }
 
-    if (message.type === "item.completed") {
-      if (message.item.type === "agent_message") resultText = message.item.text || resultText;
-      const tool = codexItemToTool(message.item);
-      if (tool) {
-        runningTools.delete(message.item.id);
-        args.onTool(Array.from(runningTools.values()).at(-1) || null, tool);
+      if (!turnCompleted) {
+        throw new Error(lastStreamError || "Codex stream ended before turn.completed");
       }
-    }
+      return resultText;
+    } catch (error) {
+      const willRetry = shouldRetryCodexTurn(error, attempt, sideEffectEventCount);
+      writeLog("error", {
+        scope: "codex-query",
+        threadTs: args.threadTs,
+        message: willRetry ? "Codex query transport failed; retrying" : "Codex query attempt failed",
+        attempt,
+        maxAttempts: MAX_CODEX_ATTEMPTS,
+        willRetry,
+        retryDelayMs: willRetry ? CODEX_RETRY_DELAY_MS : null,
+        retrySafety: sideEffectEventCount === 0 ? "no-side-effect-events" : "side-effect-events-observed",
+        eventCount,
+        itemEventCount,
+        sideEffectEventCount,
+        eventTypeCounts,
+        itemTypeCounts,
+        elapsedMs: Date.now() - attemptStartedAt,
+        sessionId: activeSessionId || null,
+        model: DEFAULT_MODEL,
+        reasoningEffort: getModelReasoningEffort() || null,
+        cwd: args.cwd,
+        runtimeSource: codexPathOverride ? "CODEX_PATH override" : "SDK bundled runtime",
+        codexPathOverride: codexPathOverride || null,
+        error: serializeError(error),
+      });
 
-    if (message.type === "turn.failed") throw new Error(message.error.message);
-    if (message.type === "error") throw new Error(message.message);
+      if (!willRetry) throw error;
+      logThread(args.threadTs, "Retrying Codex query after transport disconnect", {
+        attempt: attempt + 1,
+        maxAttempts: MAX_CODEX_ATTEMPTS,
+        sessionId: activeSessionId || null,
+        delayMs: CODEX_RETRY_DELAY_MS,
+      });
+      await sleep(CODEX_RETRY_DELAY_MS);
+    }
   }
 
-  return resultText;
+  throw new Error("Codex query exhausted retry attempts");
 }
 
 async function runClaudeQuery(args: RunAgentArgs): Promise<string> {
