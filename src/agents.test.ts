@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { shouldRetryCodexTurn } from "./agents.js";
 import { serializeError } from "./logger.js";
+import { isUploadableFilePath } from "./slack.js";
 
 const disconnect = new Error(
   "stream disconnected before completion: websocket closed by server before response.completed",
@@ -36,4 +37,10 @@ test("verbose error diagnostics include causes and redact credentials", () => {
     code: "ECONNRESET",
     stderr: "Authorization: [REDACTED]",
   });
+});
+
+test("allows audio references to be uploaded to Slack", () => {
+  assert.equal(isUploadableFilePath("/tmp/voice-reference.mp3"), true);
+  assert.equal(isUploadableFilePath("/tmp/voice-reference.WAV"), true);
+  assert.equal(isUploadableFilePath("/tmp/secret.env"), false);
 });

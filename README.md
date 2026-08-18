@@ -39,7 +39,7 @@ Import [`manifest.json`](./manifest.json) into the Slack app configuration, crea
 - **Session persistence** — resumes sessions across messages in the same thread; survives bot restarts
 - **Image attachments** — downloads images from Slack and passes them to the active provider
 - **Video attachments** — downloads videos locally so the agent can choose request-specific processing
-- **File delivery** — uploads agent-produced images, PDFs, and videos back into the Slack thread
+- **File delivery** — uploads agent-produced images, PDFs, audio, and videos back into the Slack thread
 - **Progress tracking** — renders tool execution as native Slack plan/task updates
 - **Typing indicator** — native Slack status via `assistant.threads.setStatus`
 - **Crash recovery** — automatically restarts after crashes (non-zero exit), stops cleanly on intentional shutdown

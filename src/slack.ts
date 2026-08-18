@@ -117,7 +117,13 @@ export async function fetchThreadContext(
 const UPLOADABLE_EXTENSIONS = new Set([
   "png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "pdf",
   "mp4", "mov", "m4v", "webm", "avi", "mkv", "mpg", "mpeg", "qt",
+  "mp3", "wav", "m4a", "aac", "flac", "ogg", "opus", "aif", "aiff",
 ]);
+
+export function isUploadableFilePath(filePath: string): boolean {
+  const ext = filePath.split(".").pop()?.toLowerCase() || "";
+  return UPLOADABLE_EXTENSIONS.has(ext);
+}
 
 /** Extract file paths from structured "📎 /path/to/file" lines in the result text. */
 export function extractAttachmentPaths(text: string): string[] {
@@ -142,8 +148,16 @@ export async function uploadFileToThread(
   filePath: string,
   title?: string,
 ): Promise<void> {
-  const ext = filePath.split(".").pop()?.toLowerCase() || "";
-  if (!UPLOADABLE_EXTENSIONS.has(ext)) return;
+  if (!isUploadableFilePath(filePath)) {
+    writeLog("error", {
+      scope: "upload",
+      message: "Skipped file with unsupported extension",
+      filePath,
+      channel,
+      threadTs,
+    });
+    return;
+  }
 
   try {
     await app.client.files.uploadV2({
